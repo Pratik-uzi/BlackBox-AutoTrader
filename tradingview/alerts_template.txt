@@ -1,0 +1,1 @@
+{{ticker}},{{strategy.order.action}},{{strategy.order.price}},{{strategy.position_avg_price}},{{strategy.order.contracts}},{{strategy.risk.max_position_size}}

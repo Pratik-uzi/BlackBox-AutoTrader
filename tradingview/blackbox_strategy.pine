@@ -1,0 +1,177 @@
+//@version=5
+strategy("Blackbox",
+     overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=0)
+
+//================ INPUTS =================//
+lookbackSR  = input.int(20, "HTF S/R Lookback", minval=5)
+trapPct     = input.float(0.05, "Trap Threshold (%)", step=0.01)
+
+// RR rules
+rr1  = input.float(2.0, "Partial TP1 (R)")
+rr2  = input.float(3.0, "Final TP (R)")
+
+// EMA Bias
+emaFastLen = input.int(50, "HTF EMA Fast (H1)")
+emaSlowLen = input.int(200, "HTF EMA Slow (H1)")
+
+// ATR
+atrLen  = input.int(14, "ATR Length")
+atrMult = input.float(1.2, "ATR Multiplier")
+
+//================ RISK MGMT =================//
+riskNormal  = input.float(1.0, "Risk % Normal")
+riskReduced = input.float(0.5, "Risk % DD Mode")
+ddTrigger   = input.float(2.0, "DD Trigger %")
+
+//================ EQUITY TRACK =================//
+var float peakEquity = strategy.equity
+peakEquity := math.max(peakEquity, strategy.equity)
+
+drawdownPct = (peakEquity - strategy.equity) / peakEquity * 100
+riskUsed = drawdownPct >= ddTrigger ? riskReduced : riskNormal
+
+//================ LOT BAND =================//
+f_lotBand(eq) =>
+    float minLot = 0.01
+    float maxLot = 0.01
+    if eq <= 5000
+        minLot := 0.03
+        maxLot := 0.06
+    else if eq <= 10000
+        minLot := 0.06
+        maxLot := 0.12
+    else if eq <= 25000
+        minLot := 0.15
+        maxLot := 0.30
+    else if eq <= 50000
+        minLot := 0.30
+        maxLot := 0.60
+    else
+        minLot := 0.60
+        maxLot := 1.20
+    [minLot, maxLot]
+
+//================ POSITION SIZE =================//
+f_positionSize(slDist) =>
+    riskCash = strategy.equity * riskUsed / 100
+    rawLot = riskCash / slDist
+    [minLot, maxLot] = f_lotBand(strategy.equity)
+    math.min(math.max(rawLot, minLot), maxLot)
+
+
+//================ HTF LEVELS =================//
+dailyHigh = request.security(syminfo.tickerid, "D", ta.highest(high, lookbackSR))
+dailyLow  = request.security(syminfo.tickerid, "D", ta.lowest(low, lookbackSR))
+
+//================ EMA BIAS =================//
+emaFastHTF = request.security(syminfo.tickerid, "60", ta.ema(close, emaFastLen))
+emaSlowHTF = request.security(syminfo.tickerid, "60", ta.ema(close, emaSlowLen))
+
+bullBias = emaFastHTF > emaSlowHTF and close > emaFastHTF
+bearBias = emaFastHTF < emaSlowHTF and close < emaFastHTF
+
+//================ ATR =================//
+atr = ta.atr(atrLen)
+
+//================ STATE =================//
+var float laxman = na
+var float boxHigh = na
+var float boxLow = na
+var bool inBox = false
+var string dir = ""
+
+//================ BREAKOUT =================//
+breakUp   = ta.crossover(close, dailyHigh)
+breakDown = ta.crossunder(close, dailyLow)
+
+//================ INIT =================//
+if breakUp and not inBox and bullBias
+    inBox := true
+    dir := "long"
+    laxman := close
+    boxHigh := high
+    boxLow := low
+
+if breakDown and not inBox and bearBias
+    inBox := true
+    dir := "short"
+    laxman := close
+    boxHigh := high
+    boxLow := low
+
+//================ TRACK BOX =================//
+if inBox
+    boxHigh := math.max(boxHigh, high)
+    boxLow  := math.min(boxLow, low)
+
+//================ ENTRY =================//
+longEntry = false
+shortEntry = false
+
+if inBox and dir == "long"
+    if low < laxman * (1 - trapPct / 100) and ta.crossover(close, laxman)
+        longEntry := true
+        inBox := false
+
+if inBox and dir == "short"
+    if high > laxman * (1 + trapPct / 100) and ta.crossunder(close, laxman)
+        shortEntry := true
+        inBox := false
+
+//================ VISUAL BOXES =================//
+var box tp1Box = na
+var box tp2Box = na
+var box slBox  = na
+var label rLabel = na
+
+
+//================ LONG =================//
+if longEntry
+    longSL = boxLow - atr * atrMult
+    R = close - longSL
+    lot = f_positionSize(R)
+
+    strategy.entry("BB Long", strategy.long, qty=lot)
+    strategy.exit("TP1", "BB Long", limit=close + rr1 * R, qty_percent=70)
+    strategy.exit("TP2", "BB Long", limit=close + rr2 * R, qty_percent=30)
+
+    tp1Box := box.new(bar_index, close + rr1 * R, bar_index, close, bgcolor=color.new(color.green, 85))
+    tp2Box := box.new(bar_index, close + rr2 * R, bar_index, close + rr1 * R, bgcolor=color.new(color.lime, 80))
+    slBox  := box.new(bar_index, close, bar_index, longSL, bgcolor=color.new(color.red, 85))
+
+    rLabel := label.new(bar_index, close, "R = " + str.tostring(R, "#.##"),style=label.style_label_up, textcolor=color.white, color=color.black)
+
+//================ SHORT =================//
+if shortEntry
+    shortSL = boxHigh + atr * atrMult
+    R = shortSL - close
+    lot = f_positionSize(R)
+
+    strategy.entry("BB Short", strategy.short, qty=lot)
+    strategy.exit("TP1", "BB Short", limit=close - rr1 * R, qty_percent=70)
+    strategy.exit("TP2", "BB Short", limit=close - rr2 * R, qty_percent=30)
+
+    tp1Box := box.new(bar_index, close, bar_index, close - rr1 * R, bgcolor=color.new(color.green, 85))
+    tp2Box := box.new(bar_index, close - rr1 * R, bar_index, close - rr2 * R, bgcolor=color.new(color.lime, 80))
+    slBox  := box.new(bar_index, shortSL, bar_index, close, bgcolor=color.new(color.red, 85))
+
+    rLabel := label.new(bar_index, close, "R = " + str.tostring(R, "#.##"),style=label.style_label_down, textcolor=color.white, color=color.black)
+
+//================ UPDATE VISUALS =================//
+if strategy.position_size != 0
+    box.set_right(tp1Box, bar_index)
+    box.set_right(tp2Box, bar_index)
+    box.set_right(slBox, bar_index)
+
+if strategy.position_size == 0
+    box.delete(tp1Box)
+    box.delete(tp2Box)
+    box.delete(slBox)
+    label.delete(rLabel)
+
+
+//================ VISUALS =================//
+plot(dailyHigh, "Daily High", color=color.new(color.red, 70))
+plot(dailyLow,  "Daily Low",  color=color.new(color.green, 70))
